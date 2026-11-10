@@ -1,5 +1,6 @@
 import pygame
 import random
+import math
 
 pygame.init()
 
@@ -19,7 +20,9 @@ pygame.display.set_caption("Block Breaker")
 
 # to control the frame rate
 clock = pygame.time.Clock()
-FPS = 30
+# --- Pergerakan halus -------
+FPS = 60                 # frame lebih rapat = animasi lebih halus
+DT_CAP = 1.0 / 30.0 
 
 
 # Striker class
