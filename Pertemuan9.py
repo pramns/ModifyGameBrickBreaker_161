@@ -56,6 +56,14 @@ STRIKER_FRICTION = 1700.0   # px/detik^2 - makin besar = makin cepat berhenti
 BALL_SPEED = 240.0          # px/detik  (lama: 300)
 BALL_SPEED_STEP = 6.0       # bertambah setiap blok pecah (lama: 12)
 BALL_SPEED_MAX = 400.0      # batas atas kecepatan bola (lama: 560)
+
+# --- Power-up "x3 bola" -----------------------------------------------------
+POWERUP_CHANCE = 0.25       # peluang (0-1) sebuah blok menjatuhkan tanda x3
+POWERUP_SPEED = 130.0       # px/detik - kecepatan tanda jatuh
+POWERUP_SIZE = (26, 26)     # ukuran kotak tanda
+POWERUP_MULT = 3            # jumlah bola setelah tanda ditangkap
+MAX_BALLS = 9               # batas aman supaya tidak kebanyakan bola
+YELLOW = (255, 215, 0)
 # ---------------------------------------------------------------------------
 
 
@@ -190,7 +198,6 @@ class Ball:
             self.dirx = abs(self.dirx)
         elif self.posx + self.radius >= WIDTH:
             self.posx = WIDTH - self.radius
-            self.diry = self.diry  # arah y tidak berubah
             self.dirx = -abs(self.dirx)
 
         # Reflection from the top most edge of the screen
@@ -258,6 +265,96 @@ def collisionChecker(rect, ball):
     return bool(rect.colliderect(ball))
 
 
+# PowerUp class - "tanda" yang jatuh dari blok yang pecah.
+# Kalau tanda ini kena papan, bola menjadi 3.
+class PowerUp:
+    def __init__(self, posx, posy, size=POWERUP_SIZE,
+                 speed=POWERUP_SPEED, color=YELLOW, label="x3"):
+        self.posx, self.posy = float(posx), float(posy)
+        self.width, self.height = size
+        self.speed = speed
+        self.color = color
+        self.label = label
+
+        self.rect = pygame.Rect(int(self.posx), int(self.posy),
+                                self.width, self.height)
+
+    # Used to display the object on the screen
+    def display(self):
+        pygame.draw.rect(screen, self.color, self.rect)
+        pygame.draw.rect(screen, BLACK, self.rect, 2)
+        text = font.render(self.label, True, BLACK)
+        screen.blit(text, text.get_rect(center=self.rect.center))
+
+    # Used to update the state of the object.
+    # Mengembalikan True kalau tanda sudah jatuh melewati tepi bawah layar.
+    def update(self, dt):
+        self.posy += self.speed * dt
+        self.rect = pygame.Rect(int(self.posx), int(self.posy),
+                                self.width, self.height)
+        return self.posy > HEIGHT
+
+    def getRect(self):
+        return self.rect
+
+
+# Membuat bola baru di posisi `posx, posy` dengan arah yang diputar `angle`
+# derajat dari arah `base_ball` (dipakai saat bola diperbanyak jadi 3).
+def makeBall(base_ball, posx, posy, angle=0.0):
+    ball = Ball(posx, posy, base_ball.radius, base_ball.speed, base_ball.color)
+
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    dx, dy = base_ball.dirx, base_ball.diry
+    ball.dirx = dx * cos_a - dy * sin_a
+    ball.diry = dx * sin_a + dy * cos_a
+
+    # pastikan tetap vektor satuan & tidak pernah melaju ke bawah saat lahir
+    length = math.hypot(ball.dirx, ball.diry) or 1.0
+    ball.dirx /= length
+    ball.diry = -abs(ball.diry / length)
+
+    return ball
+
+
+# Perbanyak bola menjadi `POWERUP_MULT` (3): bola lama + 2 bola baru
+# yang menyebar ke kiri dan ke kanan.
+def multiplyBalls(balls):
+    if not balls or len(balls) >= MAX_BALLS:
+        return balls
+
+    base = balls[0]
+    spread = math.radians(24)
+
+    balls.append(makeBall(base, base.posx, base.posy, -spread))
+    balls.append(makeBall(base, base.posx, base.posy, spread))
+
+    return balls[:MAX_BALLS]
+
+
+# Jatuhkan satu tanda x3 dari posisi blok yang pecah
+def spawnPowerUp(block_rect):
+    return PowerUp(block_rect.centerx - POWERUP_SIZE[0] / 2,
+                   block_rect.centery - POWERUP_SIZE[1] / 2)
+
+
+# Teks singkat yang melayang di layar (mis. "BOLA x3!")
+class FloatingText:
+    def __init__(self, text, posx, posy, color=YELLOW, life=1.0):
+        self.surface = font.render(text, True, color)
+        self.posx, self.posy = float(posx), float(posy)
+        self.life = life
+
+    def update(self, dt):
+        self.posy -= 30.0 * dt
+        self.life -= dt
+        return self.life > 0
+
+    def display(self):
+        screen.blit(self.surface,
+                    self.surface.get_rect(center=(int(self.posx),
+                                                  int(self.posy))))
+
+
 # Function used to populate the blocks
 def populateBlocks(blockWidth, blockHeight,
                    horizontalGap, verticalGap):
@@ -293,6 +390,11 @@ def gameOver():
         clock.tick(FPS)
 
 
+# Ringkasan keadaan game. Diisi setiap frame oleh main() supaya mudah
+# dipantau/diuji dari luar (mis. jumlah bola yang sedang aktif).
+GAME = {}
+
+
 # Game Manager
 def main():
     running = True
@@ -309,8 +411,14 @@ def main():
 
     striker = Striker(0, HEIGHT - 50, 100, 20, STRIKER_MAX_SPEED, WHITE)
 
+    # Bola disimpan di dalam list supaya bisa diperbanyak menjadi 3
     ball = Ball(0, HEIGHT - 150, 7, BALL_SPEED, WHITE)
     ball.reset(striker.getRect())
+    balls = [ball]
+
+    # Tanda "x3" yang jatuh, dan teks melayang (mis. "BOLA x3!")
+    powerUps = []
+    floatingTexts = []
 
     # anti "nyangkut": setelah memantul dari papan, beri jeda beberapa frame
     hitCooldown = 0
@@ -350,13 +458,21 @@ def main():
             score = 0
             ball.speed = BALL_SPEED
             ball.reset(striker.getRect())
+            balls = [ball]          # kembali ke 1 bola
+            powerUps = []           # tanda yang belum ditangkap dibuang
+            floatingTexts = []
             listOfBlocks = populateBlocks(
                 blockWidth, blockHeight, horizontalGap, verticalGap)
 
-        # Event handling (hanya untuk keluar dari game)
+        # Event handling
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+            # Tombol P = memunculkan tanda x3 untuk mencoba fitur ini
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_p:
+                powerUps.append(
+                    PowerUp(random.randint(20, WIDTH - 20 - POWERUP_SIZE[0]),
+                            120))
 
         # --- Input halus: dibaca SETIAP frame, bukan dari event ---
         keys = pygame.key.get_pressed()
@@ -367,40 +483,96 @@ def main():
             direction += 1
         # -------------------------------------------------------------------
 
+        # Ringkasan keadaan (dipakai HUD & pengujian)
+        GAME.update(striker=striker, balls=balls, blocks=listOfBlocks,
+                    powerUps=powerUps, lives=lives, score=score, frame=None)
+
+        # --- Tanda x3 jatuh: kalau kena papan, bola menjadi 3 ---
+        for i in range(len(powerUps) - 1, -1, -1):
+            pu = powerUps[i]
+            pu.update(dt)
+
+            if collisionChecker(striker.getRect(), pu.getRect()):
+                balls = multiplyBalls(balls)
+                floatingTexts.append(
+                    FloatingText("BOLA x%d!" % len(balls),
+                                 pu.getRect().centerx, pu.getRect().top))
+                powerUps.pop(i)
+            elif pu.getRect().top > HEIGHT:
+                powerUps.pop(i)     # jatuh ke bawah, hilang
+        # ---------------------------------------------------------
+
         # Collision check
         if hitCooldown > 0:
             hitCooldown -= 1
-        elif collisionChecker(striker.getRect(), ball.getRect()):
-            ball.bounceOffStriker(striker.getRect())
-            hitCooldown = 3
 
-        for block in list(listOfBlocks):
-            if collisionChecker(block.getRect(), ball.getRect()):
-                ball.bounceOffBlock(block.getRect())
-                block.hit()
+        for ball in list(balls):
+            # bola vs papan
+            if hitCooldown <= 0 and \
+                    collisionChecker(striker.getRect(), ball.getRect()):
+                ball.bounceOffStriker(striker.getRect())
+                hitCooldown = 3
 
-                if block.getHealth() <= 0:
-                    listOfBlocks.remove(block)
-                    score += 5
-                    ball.speed = min(ball.speed + BALL_SPEED_STEP,
-                                     BALL_SPEED_MAX)
-                break   # satu blok per frame biar pantulannya tidak kacau
+            # bola vs blok
+            for block in list(listOfBlocks):
+                if collisionChecker(block.getRect(), ball.getRect()):
+                    ball.bounceOffBlock(block.getRect())
+                    block.hit()
+
+                    if block.getHealth() <= 0:
+                        listOfBlocks.remove(block)
+                        score += 5
+                        for b in balls:
+                            b.speed = min(b.speed + BALL_SPEED_STEP,
+                                          BALL_SPEED_MAX)
+
+                        # Peluang menjatuhkan tanda x3
+                        if random.random() < POWERUP_CHANCE and \
+                                len(powerUps) < 3:
+                            powerUps.append(spawnPowerUp(block.getRect()))
+
+                    # satu blok per bola per frame biar pantulannya tidak kacau
+                    break
 
         # Update
         striker.update(direction, dt)
-        lifeLost = ball.update(dt)
 
-        if lifeLost:
+        # Bola yang jatuh dihapus. Kalau semuanya habis -> nyawa berkurang.
+        for i in range(len(balls) - 1, -1, -1):
+            if balls[i].update(dt):
+                balls.pop(i)
+
+        if not balls:
             lives -= 1
-            ball.reset(striker.getRect())
             print(lives)
+            ball = Ball(0, HEIGHT - 150, 7, BALL_SPEED, WHITE)
+            ball.reset(striker.getRect())
+            balls = [ball]
+
+        # Teks melayang ("BOLA x3!") naik lalu hilang
+        for i in range(len(floatingTexts) - 1, -1, -1):
+            if not floatingTexts[i].update(dt):
+                floatingTexts.pop(i)
 
         # Display
         striker.display()
-        ball.display()
+
+        for ball in balls:
+            ball.display()
 
         for block in listOfBlocks:
             block.display()
+
+        for pu in powerUps:
+            pu.display()
+
+        for ft in floatingTexts:
+            ft.display()
+
+        # Info jumlah bola di kanan bawah
+        ballsText = font.render("Bola : " + str(len(balls)), True, YELLOW)
+        screen.blit(ballsText, ballsText.get_rect(center=(WIDTH - 60,
+                                                          HEIGHT - 10)))
 
         pygame.display.update()
 
