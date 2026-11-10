@@ -1,21 +1,3 @@
-"""
-Block Breaker - versi papan (striker) lebih halus.
-
-Yang diubah supaya pergerakan papan terasa halus:
-  1. Input dibaca setiap frame dengan pygame.key.get_pressed(), bukan hanya
-     lewat event KEYDOWN/KEYUP. KEYDOWN hanya menyala sekali saat tombol
-     pertama ditekan (sesudah itu baru menyala lagi setelah repeat delay
-     keyboard), jadi papan terasa patah-patah.
-  2. Papan pakai kecepatan (velocity) + akselerasi + gesekan (friction),
-     bukan langsung loncat sejauh `speed` tiap frame. Papan jadi "meluncur"
-     dan berhenti pelan-pelan, bukan berhenti mendadak.
-  3. Semua pergerakan dikalikan delta time (dt) sehingga kecepatannya
-     konsisten di 30, 60, atau 120 FPS.
-  4. FPS dinaikkan 30 -> 60 supaya animasi lebih rapat/halus.
-  5. Bonus: sudut pantul bola sekarang tergantung titik tumbukan di papan
-     (kiri = melantun ke kiri, kanan = ke kanan), bukan sekadar yFac *= -1.
-"""
-
 import math
 import random
 
@@ -57,13 +39,39 @@ BALL_SPEED = 240.0          # px/detik  (lama: 300)
 BALL_SPEED_STEP = 6.0       # bertambah setiap blok pecah (lama: 12)
 BALL_SPEED_MAX = 400.0      # batas atas kecepatan bola (lama: 560)
 
-# --- Power-up "x3 bola" -----------------------------------------------------
-POWERUP_CHANCE = 0.25       # peluang (0-1) sebuah blok menjatuhkan tanda x3
-POWERUP_SPEED = 130.0       # px/detik - kecepatan tanda jatuh
-POWERUP_SIZE = (26, 26)     # ukuran kotak tanda
-POWERUP_MULT = 3            # jumlah bola setelah tanda ditangkap
-MAX_BALLS = 9               # batas aman supaya tidak kebanyakan bola
+# --- Power-up (tanda yang jatuh dari blok) ----------------------------------
+POWERUP_CHANCE = 0.25          # peluang blok biasa menjatuhkan tanda
+POWERUP_CHANCE_WHITE = 0.50    # blok putih (2x pukul) lebih sering menjatuhkan
+POWERUP_SPEED = 130.0          # px/detik - kecepatan tanda jatuh
+POWERUP_SIZE = (26, 26)        # ukuran kotak tanda
+POWERUP_MULT = 3               # jumlah bola setelah tanda "x3" ditangkap
+MAX_BALLS = 9                  # batas aman supaya tidak kebanyakan bola
+MAX_POWERUPS_ON_SCREEN = 3     # maksimal tanda yang jatuh bersamaan
+EFFECT_DURATION = 6.0          # detik - lama efek sementara berlangsung
+SLOWMO_FACTOR = 0.5            # bola melambat jadi 50% selama slow motion
+WIDE_FACTOR = 1.6              # papan melebar jadi 160%
+NARROW_FACTOR = 0.7            # papan menyempit jadi 70% (efek buruk)
+
 YELLOW = (255, 215, 0)
+
+# Jenis tanda: kunci -> (label, warna, durasi detik, bobot kemunculan)
+#   durasi None = efek langsung (sekali pakai), bukan efek sementara
+POWERUP_KINDS = {
+    "x3":     ("x3",  YELLOW,        None,           3),  # bola jadi 3
+    "wide":   ("<>",  (80, 200, 255), EFFECT_DURATION, 2),  # papan melebar
+    "narrow": ("()=", (200, 90, 90),  EFFECT_DURATION, 1),  # papan menyempit
+    "slow":   ("S",   (120, 160, 255), EFFECT_DURATION, 2),  # bola melambat
+    "life":   ("+",   (255, 90, 120),  None,         1),  # +1 nyawa
+    "fire":   ("F",   (255, 130, 40),  EFFECT_DURATION, 2),  # bola tembus blok
+}
+MAX_LIVES = 5
+
+
+# Ambil satu jenis tanda secara acak sesuai bobotnya
+def pickPowerUpKind():
+    kinds = list(POWERUP_KINDS)
+    weights = [POWERUP_KINDS[k][3] for k in kinds]
+    return random.choices(kinds, weights=weights, k=1)[0]
 # ---------------------------------------------------------------------------
 
 
@@ -74,6 +82,9 @@ class Striker:
         self.width, self.height = width, height
         self.speed = speed
         self.color = color
+
+        # lebar asli papan, dipakai power-up "papan melebar/menyempit"
+        self.baseWidth = width
 
         # velocity horizontal papan (px/detik). Diawali 0 = papan diam.
         self.velx = 0.0
@@ -118,6 +129,21 @@ class Striker:
         elif self.posx + self.width >= WIDTH:
             self.posx = float(WIDTH - self.width)
             self.velx = 0.0
+
+        self.strikerRect = pygame.Rect(
+            int(round(self.posx)), int(self.posy), self.width, self.height)
+
+    # Ubah lebar papan (power-up). Papan tetap di tengah posisinya dan
+    # tidak pernah keluar dari layar.
+    def setWidth(self, factor):
+        center = self.posx + self.width / 2.0
+        self.width = max(40, min(WIDTH, int(self.baseWidth * factor)))
+        self.posx = center - self.width / 2.0
+
+        if self.posx < 0:
+            self.posx = 0.0
+        elif self.posx + self.width > WIDTH:
+            self.posx = float(WIDTH - self.width)
 
         self.strikerRect = pygame.Rect(
             int(round(self.posx)), int(self.posy), self.width, self.height)
@@ -180,16 +206,28 @@ class Ball:
         # arah bola disimpan sebagai vektor satuan (x, y)
         self.dirx, self.diry = 0.6, -0.8
 
+        # True selama efek "bola api" aktif: bola menembus blok tanpa memantul
+        self.fire = False
+
     # Used to display the object on the screen
     def display(self):
-        pygame.draw.circle(screen, self.color,
-                           (int(self.posx), int(self.posy)), self.radius)
+        if self.fire:
+            # lingkaran oranye + halo supaya terlihat sedang "terbakar"
+            pygame.draw.circle(screen, (255, 200, 120),
+                               (int(self.posx), int(self.posy)),
+                               self.radius + 4, 2)
+            pygame.draw.circle(screen, (255, 130, 40),
+                               (int(self.posx), int(self.posy)), self.radius)
+        else:
+            pygame.draw.circle(screen, self.color,
+                               (int(self.posx), int(self.posy)), self.radius)
 
     # Used to update the state of the object.
+    # `dtScale` = faktor slow motion (1.0 normal, 0.5 saat slow motion).
     # Mengembalikan True kalau bola jatuh melewati tepi bawah layar.
-    def update(self, dt):
-        self.posx += self.dirx * self.speed * dt
-        self.posy += self.diry * self.speed * dt
+    def update(self, dt, dtScale=1.0):
+        self.posx += self.dirx * self.speed * dt * dtScale
+        self.posy += self.diry * self.speed * dt * dtScale
 
         # Reflecting the ball if it touches
         # either of the vertical edges (pakai radius supaya tidak "nempel")
@@ -266,15 +304,16 @@ def collisionChecker(rect, ball):
 
 
 # PowerUp class - "tanda" yang jatuh dari blok yang pecah.
-# Kalau tanda ini kena papan, bola menjadi 3.
+# Kalau tanda ini kena papan, efeknya langsung diterapkan.
 class PowerUp:
-    def __init__(self, posx, posy, size=POWERUP_SIZE,
-                 speed=POWERUP_SPEED, color=YELLOW, label="x3"):
+    def __init__(self, posx, posy, kind="x3", size=POWERUP_SIZE,
+                 speed=POWERUP_SPEED):
+        self.kind = kind
+        self.label, self.color, self.duration, _ = POWERUP_KINDS[kind]
+
         self.posx, self.posy = float(posx), float(posy)
         self.width, self.height = size
         self.speed = speed
-        self.color = color
-        self.label = label
 
         self.rect = pygame.Rect(int(self.posx), int(self.posy),
                                 self.width, self.height)
@@ -287,9 +326,10 @@ class PowerUp:
         screen.blit(text, text.get_rect(center=self.rect.center))
 
     # Used to update the state of the object.
+    # `dtScale` dipakai slow motion supaya tanda ikut melambat.
     # Mengembalikan True kalau tanda sudah jatuh melewati tepi bawah layar.
-    def update(self, dt):
-        self.posy += self.speed * dt
+    def update(self, dt, dtScale=1.0):
+        self.posy += self.speed * dt * dtScale
         self.rect = pygame.Rect(int(self.posx), int(self.posy),
                                 self.width, self.height)
         return self.posy > HEIGHT
@@ -302,6 +342,7 @@ class PowerUp:
 # derajat dari arah `base_ball` (dipakai saat bola diperbanyak jadi 3).
 def makeBall(base_ball, posx, posy, angle=0.0):
     ball = Ball(posx, posy, base_ball.radius, base_ball.speed, base_ball.color)
+    ball.fire = base_ball.fire          # bola baru ikut "terbakar"
 
     cos_a, sin_a = math.cos(angle), math.sin(angle)
     dx, dy = base_ball.dirx, base_ball.diry
@@ -331,10 +372,78 @@ def multiplyBalls(balls):
     return balls[:MAX_BALLS]
 
 
-# Jatuhkan satu tanda x3 dari posisi blok yang pecah
-def spawnPowerUp(block_rect):
+# Jatuhkan satu tanda (jenis acak sesuai bobot) dari blok yang pecah
+def spawnPowerUp(block_rect, kind=None):
+    kind = kind or pickPowerUpKind()
     return PowerUp(block_rect.centerx - POWERUP_SIZE[0] / 2,
-                   block_rect.centery - POWERUP_SIZE[1] / 2)
+                   block_rect.centery - POWERUP_SIZE[1] / 2, kind=kind)
+
+
+# Blok putih butuh 2 pukulan, jadi lebih sering menjatuhkan tanda
+def powerUpChanceFor(block_color):
+    return POWERUP_CHANCE_WHITE if block_color == WHITE else POWERUP_CHANCE
+
+
+# Terapkan efek tanda yang baru ditangkap papan.
+# Mengembalikan True kalau efeknya langsung terasa (untuk suara/feedback).
+def applyPowerUp(kind, ctx):
+    label = POWERUP_KINDS[kind][0]
+    duration = POWERUP_KINDS[kind][2]
+    striker, balls, effects = ctx["striker"], ctx["balls"], ctx["effects"]
+    posx, posy = ctx["posx"], ctx["posy"]
+
+    def say(text):
+        ctx["floatingTexts"].append(FloatingText(text, posx, posy,
+                                                 POWERUP_KINDS[kind][1]))
+
+    if kind == "x3":
+        ctx["balls"] = multiplyBalls(balls)
+        say("BOLA x%d!" % len(ctx["balls"]))
+
+    elif kind == "wide":
+        striker.setWidth(WIDE_FACTOR)
+        effects["wide"] = duration
+        say("PAPAN LEBAR!")
+
+    elif kind == "narrow":
+        striker.setWidth(NARROW_FACTOR)
+        effects["narrow"] = duration
+        say("PAPAN MENYEMPIT!")
+
+    elif kind == "slow":
+        effects["slow"] = duration
+        say("SLOW MOTION!")
+
+    elif kind == "fire":
+        for b in balls:
+            b.fire = True
+        effects["fire"] = duration
+        say("BOLA API!")
+
+    elif kind == "life":
+        ctx["lives"] = min(ctx["lives"] + 1, MAX_LIVES)
+        say("+1 NYAWA!")
+
+    return True
+
+
+# Kurangi durasi efek sementara. Kalau habis, kembalikan keadaan semula.
+def updateEffects(effects, dt, striker, balls):
+    for name in list(effects):
+        effects[name] -= dt
+        if effects[name] <= 0:
+            del effects[name]
+
+            if name in ("wide", "narrow"):
+                striker.setWidth(1.0)      # lebar papan kembali normal
+            elif name == "fire":
+                for b in balls:
+                    b.fire = False
+
+
+# Faktor kecepatan global: 1.0 normal, SLOWMO_FACTOR saat slow motion
+def timeScale(effects):
+    return SLOWMO_FACTOR if effects.get("slow") else 1.0
 
 
 # Teks singkat yang melayang di layar (mis. "BOLA x3!")
@@ -416,9 +525,10 @@ def main():
     ball.reset(striker.getRect())
     balls = [ball]
 
-    # Tanda "x3" yang jatuh, dan teks melayang (mis. "BOLA x3!")
+    # Tanda yang jatuh, teks melayang, dan efek sementara yang sedang aktif
     powerUps = []
     floatingTexts = []
+    effects = {}          # mis. {"wide": 4.2, "fire": 1.8} = sisa detik
 
     # anti "nyangkut": setelah memantul dari papan, beri jeda beberapa frame
     hitCooldown = 0
@@ -457,10 +567,13 @@ def main():
             lives = 3
             score = 0
             ball.speed = BALL_SPEED
+            ball.fire = False
             ball.reset(striker.getRect())
             balls = [ball]          # kembali ke 1 bola
             powerUps = []           # tanda yang belum ditangkap dibuang
             floatingTexts = []
+            effects = {}            # semua efek sementara dibatalkan
+            striker.setWidth(1.0)   # lebar papan kembali normal
             listOfBlocks = populateBlocks(
                 blockWidth, blockHeight, horizontalGap, verticalGap)
 
@@ -468,11 +581,17 @@ def main():
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
-            # Tombol P = memunculkan tanda x3 untuk mencoba fitur ini
-            if event.type == pygame.KEYDOWN and event.key == pygame.K_p:
-                powerUps.append(
-                    PowerUp(random.randint(20, WIDTH - 20 - POWERUP_SIZE[0]),
-                            120))
+            # Tombol 1-6 = memunculkan tanda tertentu (buat mencoba fitur)
+            #   1 = x3 bola, 2 = papan lebar, 3 = papan sempit,
+            #   4 = slow motion, 5 = +1 nyawa, 6 = bola api
+            if event.type == pygame.KEYDOWN:
+                kindKeys = [pygame.K_1, pygame.K_2, pygame.K_3,
+                            pygame.K_4, pygame.K_5, pygame.K_6]
+                if event.key in kindKeys:
+                    kind = list(POWERUP_KINDS)[kindKeys.index(event.key)]
+                    powerUps.append(PowerUp(
+                        random.randint(20, WIDTH - 20 - POWERUP_SIZE[0]),
+                        120, kind=kind))
 
         # --- Input halus: dibaca SETIAP frame, bukan dari event ---
         keys = pygame.key.get_pressed()
@@ -483,20 +602,36 @@ def main():
             direction += 1
         # -------------------------------------------------------------------
 
+        # Efek sementara berkurang; yang habis dikembalikan ke normal
+        updateEffects(effects, dt, striker, balls)
+
+        # Faktor kecepatan: 1.0 normal, 0.5 saat slow motion
+        scale = timeScale(effects)
+
         # Ringkasan keadaan (dipakai HUD & pengujian)
         GAME.update(striker=striker, balls=balls, blocks=listOfBlocks,
-                    powerUps=powerUps, lives=lives, score=score, frame=None)
+                    powerUps=powerUps, lives=lives, score=score,
+                    effects=effects, scale=scale)
 
-        # --- Tanda x3 jatuh: kalau kena papan, bola menjadi 3 ---
+        # --- Tanda jatuh: kalau kena papan, efeknya langsung diterapkan ---
         for i in range(len(powerUps) - 1, -1, -1):
             pu = powerUps[i]
-            pu.update(dt)
+            pu.update(dt, scale)
 
             if collisionChecker(striker.getRect(), pu.getRect()):
-                balls = multiplyBalls(balls)
-                floatingTexts.append(
-                    FloatingText("BOLA x%d!" % len(balls),
-                                 pu.getRect().centerx, pu.getRect().top))
+                ctx = {
+                    "striker": striker,
+                    "balls": balls,
+                    "effects": effects,
+                    "floatingTexts": floatingTexts,
+                    "posx": pu.getRect().centerx,
+                    "posy": pu.getRect().top,
+                    "lives": lives,
+                }
+                applyPowerUp(pu.kind, ctx)
+                # "x3" bisa mengganti list bola, "+1 nyawa" mengubah lives
+                balls = ctx["balls"]
+                lives = ctx["lives"]
                 powerUps.pop(i)
             elif pu.getRect().top > HEIGHT:
                 powerUps.pop(i)     # jatuh ke bawah, hilang
@@ -516,7 +651,14 @@ def main():
             # bola vs blok
             for block in list(listOfBlocks):
                 if collisionChecker(block.getRect(), ball.getRect()):
-                    ball.bounceOffBlock(block.getRect())
+                    if ball.fire:
+                        # bola api menembus blok: tidak memantul,
+                        # langsung merusak dua kali lipat
+                        block.damage = 200
+                    else:
+                        block.damage = 100
+                        ball.bounceOffBlock(block.getRect())
+
                     block.hit()
 
                     if block.getHealth() <= 0:
@@ -526,9 +668,10 @@ def main():
                             b.speed = min(b.speed + BALL_SPEED_STEP,
                                           BALL_SPEED_MAX)
 
-                        # Peluang menjatuhkan tanda x3
-                        if random.random() < POWERUP_CHANCE and \
-                                len(powerUps) < 3:
+                        # Peluang menjatuhkan tanda. Blok putih (2x pukul)
+                        # lebih sering menjatuhkannya.
+                        if len(powerUps) < MAX_POWERUPS_ON_SCREEN and \
+                                random.random() < powerUpChanceFor(block.color):
                             powerUps.append(spawnPowerUp(block.getRect()))
 
                     # satu blok per bola per frame biar pantulannya tidak kacau
@@ -539,13 +682,14 @@ def main():
 
         # Bola yang jatuh dihapus. Kalau semuanya habis -> nyawa berkurang.
         for i in range(len(balls) - 1, -1, -1):
-            if balls[i].update(dt):
+            if balls[i].update(dt, scale):
                 balls.pop(i)
 
         if not balls:
             lives -= 1
             print(lives)
             ball = Ball(0, HEIGHT - 150, 7, BALL_SPEED, WHITE)
+            ball.fire = bool(effects.get("fire"))   # ikut efek bola api
             ball.reset(striker.getRect())
             balls = [ball]
 
@@ -572,6 +716,14 @@ def main():
         # Info jumlah bola di kanan bawah
         ballsText = font.render("Bola : " + str(len(balls)), True, YELLOW)
         screen.blit(ballsText, ballsText.get_rect(center=(WIDTH - 60,
+                                                          HEIGHT - 10)))
+
+        # Sisa waktu efek sementara yang sedang aktif (di bawah tengah layar)
+        if effects:
+            active = "  ".join("%s %.1fs" % (POWERUP_KINDS[k][0], v)
+                               for k, v in sorted(effects.items()))
+            effText = font.render(active, True, (200, 200, 200))
+            screen.blit(effText, effText.get_rect(center=(WIDTH // 2,
                                                           HEIGHT - 10)))
 
         pygame.display.update()
